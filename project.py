@@ -5,648 +5,881 @@ import math
 import time
 import random
 
-# Camera-related variables
-camera_pos = (0, -300, 200)  # Position camera behind and above the runner
+# perspective field-of-view
+FOV_Y = 60                  
+cam_pos = (0, -300, 200)
 
-fovY = 60  # Field of view
-GRID_LENGTH = 600  # Length of grid lines
-rand_var = 423
+# Lanes, runner & movement
+LANE_W = 100
+LANE_X = [-LANE_W, 0, LANE_W]   # left/center/right X-positions
 
-# Game variables
-LANE_WIDTH = 100  # Width of each lane
-LANE_POSITIONS = [-LANE_WIDTH, 0, LANE_WIDTH]  # Left, Center, Right lane positions
-current_lane = 1  # Start in center lane (0=left, 1=center, 2=right)
-runner_z_pos = 0  # Runner's forward position
-runner_x_pos = LANE_POSITIONS[current_lane]  # Runner's side position
-runner_target_x = runner_x_pos  # Target position for smooth lane switching
+lane_idx = 1                     # start center lane
+runner_forward = 0               # y-axis forward along track
+runner_side = LANE_X[lane_idx]   # x-axis along lanes
+runner_side_goal = runner_side   # smooth lane switching target
 
-# Animation variables
-track_offset = 0  # For moving track effect
-game_speed = 0.5  # Starting game movement speed (much slower)
-base_speed = 0.5  # Base speed (reduced)
-max_speed = 3  # Maximum speed (reduced)
-lane_transition_speed = 5  # Speed of lane switching animation
+# Animation pacing
+track_scroll = 0
+base_speed = 0.7
+game_speed = base_speed
+max_speed = 4
+lane_interp_speed = 5
 
-# Game state
-game_running = True           # Also used as "not paused"
+# Runner animation (speeds up with distance)
+anim_base = 0.02
+anim_max = 0.05
+anim_curr = anim_base
+
+
+# Game state & score
+is_running = True
 score = 0
-points = 0                    # Points from collecting coins
-distance_covered = 0.0        # Total distance traveled (float for precision)
-start_time = None             # Track when game started (or last resumed)
-pause_start = None            # Time when pause began
-first_person_view = False  # False = third-person view, True = first-person view
+points = 0
+meters = 0.0
+t_start = None
+t_pause_begin = None
+is_fp = False    
+lives = 5
 
-# Arm swing tuning (bigger swing for running)
-ARM_SWING_MAX_DEG = 5     # amplitude (degrees) – larger for a running feel
-ARM_SWING_SPEED = 0.02        # swing speed multiplier
+# Arms swing tuning
+ARM_SWING_MAX = 5
+ARM_SWING_RATE = 0.02
 
-# Coin system
-coins = []  # List to store active coins
-coin_spawn_timer = 0  # Timer for coin spawning
-coin_spawn_interval = 2.0  # Time between coin spawns (seconds)
-coin_collection_distance = 15  # Distance at which coins are collected
+# Day/Night
+is_day = False
+bg_rgb = [0.2, 0.3, 0.5]
+is_transitioning = False
+trans_dir = 0            # +1 night to day, -1 day to night
+trans_step = 0.01
 
-# Obstacle system
-obstacles = []  # List to store active obstacles
-obstacle_spawn_timer = 0  # Timer for obstacle spawning
-obstacle_spawn_interval = 3.0  # Time between obstacle spawns (seconds)
-obstacle_collision_distance = 20  # Distance at which obstacles cause collision
-min_vertical_gap = 500 # Minimum vertical gap between obstacles
+#coins
+coins = []
+coin_t = 0.0
+coin_period = 2.0
+coin_pick_radius = 15
+coin_double_prob = 0.25
+
+#obstacles
+obstacles = []
+ob_t = 0.0
+ob_period = 3.5
+hit_radius = 20
+min_y_gap = 800
+
+#magnet
+magnets = []
+mg_t = 0.0
+mg_period = 25
+mag_on = False
+mag_time_left = 0.0
+mag_seconds = 10
+mag_radius = 500
+mag_pick_radius = 15
+mag_pull = 15.0
 
 def reset_game():
-    """Reset all game variables to initial state"""
-    global current_lane, runner_z_pos, runner_x_pos, runner_target_x
-    global track_offset, game_speed, game_running, score, points
-    global distance_covered, start_time, pause_start, coins, coin_spawn_timer
-    global obstacles, obstacle_spawn_timer
-    
-    current_lane = 1
-    runner_z_pos = 0
-    runner_x_pos = LANE_POSITIONS[current_lane]
-    runner_target_x = runner_x_pos
-    track_offset = 0
-    game_speed = base_speed  # Reset to base speed
-    game_running = True
+    global lane_idx, runner_forward, runner_side, runner_side_goal
+    global track_scroll, game_speed, is_running, score, points
+    global meters, t_start, t_pause_begin, coins, coin_t
+    global obstacles, ob_t, anim_curr, lives
+    global magnets, mg_t, mag_on, mag_time_left
+
+    # Reset player position to center lane
+    lane_idx = 1
+    runner_forward = 0
+    runner_side = LANE_X[lane_idx]
+    runner_side_goal = runner_side
+
+    # Reset movement and animation
+    track_scroll = 0
+    game_speed = base_speed
+    anim_curr = anim_base
+
+    # Reset game state
+    is_running = True
     score = 0
     points = 0
-    distance_covered = 0.0
-    start_time = time.time()  # Reset start time
-    pause_start = None
-    coins = []  # Clear all coins
-    coin_spawn_timer = 0
-    obstacles = []  # Clear all obstacles
-    obstacle_spawn_timer = 0
+    meters = 0.0
 
-def draw_text(x, y, text, font=GLUT_BITMAP_HELVETICA_18):
+    # Reset timing
+    t_start = time.time()
+    t_pause_begin = None
+
+    # Clear all collectible items
+    coins = []
+    coin_t = 0.0
+
+    obstacles = []
+    ob_t = 0.0
+
+    lives = 5
+
+    # Reset power-ups
+    magnets = []
+    mg_t = 0.0
+    mag_on = False
+    mag_time_left = 0.0
+
+
+def draw_bg(): #2D
+    glDisable(GL_DEPTH_TEST)
+
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    gluOrtho2D(-1, 1, -1, 1)
+
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+
+    glColor3f(bg_rgb[0], bg_rgb[1], bg_rgb[2])
+    glBegin(GL_QUADS)
+    glVertex2f(-1, -1)
+    glVertex2f( 1, -1)
+    glVertex2f( 1,  1)
+    glVertex2f(-1,  1)
+    glEnd()
+
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+    glEnable(GL_DEPTH_TEST)
+
+
+def draw_text(x, y, s, font=GLUT_BITMAP_HELVETICA_18):
     glColor3f(1, 1, 1)
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
     glLoadIdentity()
     gluOrtho2D(0, 1200, 0, 800)
+
     glMatrixMode(GL_MODELVIEW)
     glPushMatrix()
     glLoadIdentity()
+
     glRasterPos2f(x, y)
-    for ch in text:
+    for ch in s:
         glutBitmapCharacter(font, ord(ch))
+
     glPopMatrix()
     glMatrixMode(GL_PROJECTION)
     glPopMatrix()
     glMatrixMode(GL_MODELVIEW)
 
-def draw_track():
-    """Draw the 3-lane track with lane markers"""
-    # Draw main track surface
-    glColor3f(0.3, 0.3, 0.3)  # Dark gray track
+def draw_ground():
+    glColor3f(0.2, 0.8, 0.2)
     glBegin(GL_QUADS)
-    
-    track_length = 2000
-    track_width = LANE_WIDTH * 3
-    
-    # Main track surface
-    glVertex3f(-track_width/2, -track_length, 0)
-    glVertex3f(track_width/2, -track_length, 0)
-    glVertex3f(track_width/2, track_length, 0)
-    glVertex3f(-track_width/2, track_length, 0)
-    
+    g = 1000
+    glVertex3f(-g, -g, -5)
+    glVertex3f( g, -g, -5)
+    glVertex3f( g,  g, -5)
+    glVertex3f(-g,  g, -5)
     glEnd()
-    
-    # Draw lane dividers
-    glColor3f(1, 1, 0)  # Yellow lane markers
-    glLineWidth(3)
-    
-    # Animate lane markers moving towards the runner
-    marker_spacing = 100
-    num_markers = int(track_length * 2 / marker_spacing) + 5
-    
-    for i in range(num_markers):
-        y_pos = (i * marker_spacing) - track_length - (track_offset % marker_spacing)
 
-        
-        # Left lane divider
-        glBegin(GL_LINES)
-        glVertex3f(-LANE_WIDTH/2, y_pos, 1)
-        glVertex3f(-LANE_WIDTH/2, y_pos + marker_spacing/2, 1)
+    glColor3f(0.6, 0.3, 0.1)
+    h = 50
+    road_w = LANE_W * 3
+
+    # left barrier
+    glBegin(GL_QUADS)
+    glVertex3f(-road_w/2 - 20, -1000, 0)
+    glVertex3f(-road_w/2 - 20,  1000, 0)
+    glVertex3f(-road_w/2 - 20,  1000, h)
+    glVertex3f(-road_w/2 - 20, -1000, h)
+    glEnd()
+
+    # right barrier
+    glBegin(GL_QUADS)
+    glVertex3f( road_w/2 + 20, -1000, 0)
+    glVertex3f( road_w/2 + 20,  1000, 0)
+    glVertex3f( road_w/2 + 20,  1000, h)
+    glVertex3f( road_w/2 + 20, -1000, h)
+    glEnd()
+
+
+def draw_trees():
+    day_k = 1.0 if is_day else 0.4
+    road_w = LANE_W * 3
+    tree_x = road_w/2 + 80
+    step = 150
+
+    for side in (-1, 1):
+        x_pos = side * tree_x
+        for i in range(-15, 25):
+            z_pos = i * step - (track_scroll % step)
+            random.seed(i + side * 100)
+            s = random.uniform(0.8, 1.2)
+            trunk_h = 25 * s
+            crown = 15 * s
+
+            glPushMatrix()
+            glTranslatef(x_pos, z_pos, trunk_h/2)
+            glColor3f(0.4 * day_k, 0.2 * day_k, 0.1 * day_k)
+            glScalef(3, 3, trunk_h)
+            glutSolidCube(1)
+            glPopMatrix()
+
+            glPushMatrix()
+            glTranslatef(x_pos, z_pos, trunk_h + crown/2)
+            glColor3f(0.1 * day_k, 0.6 * day_k, 0.1 * day_k)
+            gluSphere(gluNewQuadric(), crown, 8, 8)
+            glPopMatrix()
+
+
+def draw_track():
+    glColor3f(0.3, 0.3, 0.3)
+    glBegin(GL_QUADS)
+
+    t_len = 2000
+    t_w = LANE_W * 3
+    glVertex3f(-t_w/2, -t_len, 0)
+    glVertex3f( t_w/2, -t_len, 0)
+    glVertex3f( t_w/2,  t_len, 0)
+    glVertex3f(-t_w/2,  t_len, 0)
+    glEnd()
+
+    glColor3f(1, 1, 0)
+    gap = 100
+    count = int(t_len * 2 / gap) + 5
+
+    for i in range(count):
+        y = (i * gap) - t_len - (track_scroll % gap)
+
+        glBegin(GL_QUADS)
+        glVertex3f(-LANE_W/2 - 2, y, 1)
+        glVertex3f(-LANE_W/2 + 2, y, 1)
+        glVertex3f(-LANE_W/2 + 2, y + gap/2, 1)
+        glVertex3f(-LANE_W/2 - 2, y + gap/2, 1)
         glEnd()
-        
-        # Right lane divider
-        glBegin(GL_LINES)
-        glVertex3f(LANE_WIDTH/2, y_pos, 1)
-        glVertex3f(LANE_WIDTH/2, y_pos + marker_spacing/2, 1)
+
+        glBegin(GL_QUADS)
+        glVertex3f( LANE_W/2 - 2, y, 1)
+        glVertex3f( LANE_W/2 + 2, y, 1)
+        glVertex3f( LANE_W/2 + 2, y + gap/2, 1)
+        glVertex3f( LANE_W/2 - 2, y + gap/2, 1)
         glEnd()
+
+def draw_coin(x, y, z, kind="normal"):
+    glPushMatrix()
+    glTranslatef(x, y, z)
+    if kind == "double":
+        glColor3f(1, 1, 0)
+    else:
+        glColor3f(0.9,0.9,0.9)
+    gluSphere(gluNewQuadric(), 10, 10, 10)
+    glPopMatrix()
+
+
+def draw_magnet(x, y, z):
+    glPushMatrix()
+    glTranslatef(x, y, z)
+
+    glColor3f(1, 0.4, 0.8)
+    glPushMatrix()
+    glRotatef(90, 1, 0, 0)
+    gluCylinder(gluNewQuadric(), 4, 4, 12, 8, 8)
+    glPopMatrix()
+
+    glPushMatrix()
+    glTranslatef(0, -6, 0)
+    glColor3f(1, 0, 0)
+    gluCylinder(gluNewQuadric(), 4.5, 4.5, 2, 8, 8)
+    glPopMatrix()
+
+    glPushMatrix()
+    glTranslatef(0, 6, 0)
+    glColor3f(0, 0, 1)
+    gluCylinder(gluNewQuadric(), 4.5, 4.5, 2, 8, 8)
+    glPopMatrix()
+
+    glColor3f(0.8, 0.8, 0.8)
+    glBegin(GL_LINES)
+    for i in range(8):
+        ang = i * 45
+        r = 15
+        x1 = r * math.cos(math.radians(ang))
+        z1 = r * math.sin(math.radians(ang))
+        x2 = (r + 5) * math.cos(math.radians(ang))
+        z2 = (r + 5) * math.sin(math.radians(ang))
+        glVertex3f(x1, 0, z1)
+        glVertex3f(x2, 0, z2)
+    glEnd()
+
+    glPopMatrix()
+
+
+def draw_obstacle(x, y, z, kind="normal"):
+    glPushMatrix()
+    glTranslatef(x, y, z)
+    if kind == "life":
+        glColor3f(0, 0, 0)
+    else:
+        glColor3f(1, 0, 0)
+    glutSolidCube(20)
+    glPopMatrix()
+
 
 def draw_runner():
-    """Draw the runner character with detailed body parts"""
     glPushMatrix()
-    
-    # Position the runner
-    glTranslatef(runner_x_pos, runner_z_pos, 20)  # Slightly above ground
-    
-    run_cycle_legs = (track_offset * 0.02) % (2 * math.pi)
-    leg_stride = math.sin(run_cycle_legs) * 4
+    # Position character at current lane and forward position
+    glTranslatef(runner_side, runner_forward, 20)
 
-    # Arms opposite phase to legs
-    arm_swing = math.sin(run_cycle_legs + math.pi) * ARM_SWING_MAX_DEG
-    
-    # Runner body (rectangular torso)
+    # animation phase for running motion
+    phase = (track_scroll * anim_curr) % (2 * math.pi)
+    leg_stride = math.sin(phase) * 4          # Leg movement
+    arm_swing = math.sin(phase + math.pi) * ARM_SWING_MAX  # Arms opposite to legs
+    # character drawing
     glPushMatrix()
-    glColor3f(0, 0.5, 1)  # Blue shirt
-    glScalef(1.2, 0.8, 1.8)  # Make it more rectangular
+    if is_day:
+        glColor3f(0, 0.5, 1)      # Blue shirt in daylight
+    else:
+        glColor3f(0.4, 0.4, 0.4)  # Gray shirt at night
+    glScalef(1.2, 0.8, 1.8)       # Make rectangular torso
     glutSolidCube(15)
     glPopMatrix()
+
     
-    # Runner head (sphere)
     glPushMatrix()
     glTranslatef(0, 0, 18)
-    glColor3f(1, 0.8, 0.6)  # Skin color
-    glutSolidSphere(8, 10, 10)  # radius, slices, stacks
+    glColor3f(1, 0.8, 0.6)        # Skin color
+    gluSphere(gluNewQuadric(), 8, 10, 10)
     glPopMatrix()
-    
-    # Hair (dark sphere on top of head)
+
     glPushMatrix()
     glTranslatef(0, 0, 25)
-    glColor3f(0.3, 0.2, 0.1)  # Brown hair
-    glutSolidSphere(8.5, 8, 8)  # Slightly larger than head
+    glColor3f(0.3, 0.2, 0.1)
+    gluSphere(gluNewQuadric(), 8.5, 8, 8)
     glPopMatrix()
-    
-    # ---- ARMS: bigger back-and-forth swing ----
-    # We rotate first to give a neutral "slight backward" pose, then add +/- swing.
-    # Arm geometry points down after a 90° X-rotation.
-    base_arm_bias = -5.0  # slight backwards bias looks more like running
-    # Left Arm
+
+    base_bias = -5.0
     glPushMatrix()
     glTranslatef(-12, 0, 10)
-    glRotatef(base_arm_bias + arm_swing, 1, 0, 0)  # larger swing
-    glRotatef(90, 1, 0, 0)  # point cylinder down
+    glRotatef(base_bias + arm_swing, 1, 0, 0)
+    glRotatef(90, 1, 0, 0)
     glColor3f(1, 0.8, 0.6)
     gluCylinder(gluNewQuadric(), 2, 2, 12, 8, 8)
     glPopMatrix()
-    
-    # Right Arm (opposite swing)
+
     glPushMatrix()
     glTranslatef(12, 0, 10)
-    glRotatef(base_arm_bias - arm_swing, 1, 0, 0)  # opposite phase
-    glRotatef(90, 1, 0, 0)  # point cylinder down
+    glRotatef(base_bias - arm_swing, 1, 0, 0)
+    glRotatef(90, 1, 0, 0)
     glColor3f(1, 0.8, 0.6)
     gluCylinder(gluNewQuadric(), 2, 2, 12, 8, 8)
     glPopMatrix()
-    # ---- /ARMS ----
-    
-    # ---- LEGS (fixed, pointing downward) ----
-    hip_z = -13.5          # torso half-height below origin
-    leg_height = 14.0      # ends near ground
-    
-    # Left Leg
+
+    hip_z = -13.5
+    leg_h = 14.0
+
     glPushMatrix()
     glTranslatef(-5, 0, hip_z)
-    glRotatef(leg_stride, 1, 0, 0)  # stride
-    glRotatef(180, 1, 0, 0)         # point cylinder toward -Z (down)
-    glColor3f(0.2, 0.2, 0.8)        # Dark blue pants
-    gluCylinder(gluNewQuadric(), 3, 3, leg_height, 8, 8)
+    glRotatef(leg_stride, 1, 0, 0)
+    glRotatef(180, 1, 0, 0)
+    if is_day:
+        glColor3f(0.2, 0.2, 0.8)
+    else:
+        glColor3f(0.1, 0.1, 0.1)
+    gluCylinder(gluNewQuadric(), 3, 3, leg_h, 8, 8)
     glPopMatrix()
-    
-    # Right Leg (opposite stride)
+
     glPushMatrix()
     glTranslatef(5, 0, hip_z)
     glRotatef(-leg_stride, 1, 0, 0)
     glRotatef(180, 1, 0, 0)
-    glColor3f(0.2, 0.2, 0.8)
-    gluCylinder(gluNewQuadric(), 3, 3, leg_height, 8, 8)
+    if is_day:
+        glColor3f(0.2, 0.2, 0.8)
+    else:
+        glColor3f(0.1, 0.1, 0.1)
+    gluCylinder(gluNewQuadric(), 3, 3, leg_h, 8, 8)
     glPopMatrix()
 
-    # Feet
-    foot_z = hip_z - leg_height - 1.0  # tiny offset to avoid z-fighting
-    # Left Foot
+    foot_z = hip_z - leg_h - 1.0
     glPushMatrix()
     glTranslatef(-5, 2, foot_z)
     glColor3f(0.1, 0.1, 0.1)
     glScalef(0.8, 1.2, 0.4)
     glutSolidCube(6)
     glPopMatrix()
-    # Right Foot
+
     glPushMatrix()
     glTranslatef(5, 2, foot_z)
     glColor3f(0.1, 0.1, 0.1)
     glScalef(0.8, 1.2, 0.4)
     glutSolidCube(6)
     glPopMatrix()
-    # ---- /LEGS ----
-    
+
     glPopMatrix()
 
-def draw_coin(x, y, z):
-    """Draw a yellow sphere representing a coin"""
-    glPushMatrix()
-    glTranslatef(x, y, z)
-    glColor3f(1, 1, 0)  # Yellow color
-    glutSolidSphere(10, 10, 10)  # Draw the coin
-    glPopMatrix()
 
-def draw_obstacle(x, y, z):
-    """Draw a red cube representing an obstacle"""
-    glPushMatrix()
-    glTranslatef(x, y, z)
-    glColor3f(1, 0, 0)  # Red color
-    glutSolidCube(20)  # Draw the obstacle
-    glPopMatrix()
 
-def draw_coins():
-    """Draw all active coins"""
-    for coin in coins:
-        draw_coin(coin['x'], coin['y'], coin['z'])
+def draw_all_coins():
+    for c in coins:
+        draw_coin(c['x'], c['y'], c['z'], c.get('type', 'normal'))
 
-def draw_obstacles():
-    """Draw all active obstacles"""
-    for obstacle in obstacles:
-        draw_obstacle(obstacle['x'], obstacle['y'], obstacle['z'])
 
-def is_position_valid(new_x, new_y, is_obstacle=False):
-    """Check if a new position is valid (doesn't overlap with existing objects)"""
-    # Check against obstacles
-    for obstacle in obstacles:
-        if abs(obstacle['y'] - new_y) < min_vertical_gap and obstacle['x'] == new_x:
+def draw_all_magnets():
+    for m in magnets:
+        draw_magnet(m['x'], m['y'], m['z'])
+
+
+def draw_all_obstacles():
+    for o in obstacles:
+        draw_obstacle(o['x'], o['y'], o['z'], o.get('type', 'normal'))
+
+
+
+
+#spawn
+def spot_ok(nx, ny, is_ob=False, is_coin=False, is_mg=False):
+    min_gap = 150
+    coin_gap = 100
+
+    for ob in obstacles:
+        if abs(ob['y'] - ny) < min_y_gap and ob['x'] == nx:
             return False
-    
-    # Check against coins (if placing an obstacle)
-    if is_obstacle:
-        for coin in coins:
-            if abs(coin['y'] - new_y) < min_vertical_gap and coin['x'] == new_x:
+
+    if is_coin or is_ob or is_mg:
+        for c in coins:
+            d = math.hypot(c['x'] - nx, c['y'] - ny)
+            if d < coin_gap:
                 return False
-    
+
+    if is_coin or is_ob or is_mg:
+        for m in magnets:
+            d = math.hypot(m['x'] - nx, m['y'] - ny)
+            if d < min_gap:
+                return False
+
+    if is_ob:
+        nearby = []
+        for ob in obstacles:
+            if abs(ob['y'] - ny) < min_gap:
+                nearby.append(ob['x'])
+        blocked = set(nearby + [nx])
+        if len(blocked) >= 3:
+            return False
+
     return True
 
-def spawn_coin():
-    """Spawn a new coin at a random position in front of the player"""
-    attempts = 0
-    max_attempts = 10  # Prevent infinite loop
-    
-    while attempts < max_attempts:
-        lane = random.randint(0, 2)  # Random lane (0=left, 1=center, 2=right)
-        x = LANE_POSITIONS[lane]
-        y = runner_z_pos + 300 + random.randint(0, 200)  # Spawn ahead of player
-        z = 20  # Same height as runner
-        
-        # Check if position is valid
-        if is_position_valid(x, y):
-            coins.append({'x': x, 'y': y, 'z': z})
-            return
-        
-        attempts += 1
 
-def spawn_obstacle():
-    """Spawn obstacles in front of the player, ensuring not all lanes are blocked and with proper spacing"""
-    attempts = 0
-    max_attempts = 10  # Prevent infinite loop
-    
-    while attempts < max_attempts:
-        # Choose 1 or 2 lanes to spawn obstacles (never all 3)
-        num_obstacles = random.randint(1, 2)
-        obstacle_lanes = random.sample([0, 1, 2], num_obstacles)
-        
-        valid_placement = True
-        new_obstacles = []
-        
-        for lane in obstacle_lanes:
-            x = LANE_POSITIONS[lane]
-            y = runner_z_pos + 400 + random.randint(0, 100)  # Spawn ahead of player
-            z = 10  # Height of obstacle
-            
-            # Check if position is valid
-            if not is_position_valid(x, y, is_obstacle=True):
-                valid_placement = False
-                break
-                
-            new_obstacles.append({'x': x, 'y': y, 'z': z})
-        
-        # If all obstacles are valid, add them to the game
-        if valid_placement and new_obstacles:
-            obstacles.extend(new_obstacles)
+def emit_coin():
+    tries = 0
+    while tries < 15:
+        lane = random.randint(0, 2)                    # Pick random lane
+        x = LANE_X[lane]
+        y = runner_forward + 300 + random.randint(50, 250)  # Spawn ahead of player
+        z = 20
+
+        # coin type: normal (1 point) or double (2 points)
+        kind = "double" if random.random() < coin_double_prob else "normal"
+
+        # Check if position doesn't overlap with other objects
+        if spot_ok(x, y, is_coin=True):
+            coins.append({'x': x, 'y': y, 'z': z, 'type': kind})
             return
-        
-        attempts += 1
+        tries += 1
+
+
+def emit_obstacles():
+    tries = 0
+    while tries < 15:
+        how_many = random.randint(1, 2)
+
+        recent = [ob['x'] for ob in obstacles[-6:]]
+        use = {
+            LANE_X[0]: recent.count(LANE_X[0]),
+            LANE_X[1]: recent.count(LANE_X[1]),
+            LANE_X[2]: recent.count(LANE_X[2]),
+        }
+        lanes_sorted = sorted(use.keys(), key=lambda k: use[k])
+
+        if how_many == 1:
+            if random.random() < 0.6:
+                chosen = [lanes_sorted[0]]
+            else:
+                chosen = [random.choice(LANE_X)]
+        else:
+            if random.random() < 0.7:
+                chosen = lanes_sorted[:2]
+            else:
+                chosen = random.sample(LANE_X, 2)
+
+        ok = True
+        newlist = []
+        base_y = runner_forward + 400 + random.randint(50, 150)
+        for lane_x in chosen:
+            x = lane_x
+            y = base_y + random.randint(-20, 20)
+            z = 10
+            kind = "life" if random.random() < 0.25 else "normal"
+            if not spot_ok(x, y, is_ob=True):
+                ok = False
+                break
+            newlist.append({'x': x, 'y': y, 'z': z, 'type': kind})
+
+        occ = [o['x'] for o in newlist]
+        free = [p for p in LANE_X if p not in occ]
+
+        if ok and newlist and len(free) > 0:
+            obstacles.extend(newlist)
+            return
+
+        tries += 1
+
+
+def emit_magnet():
+    tries = 0
+    while tries < 15:
+        lane = random.randint(0, 2)
+        x = LANE_X[lane]
+        y = runner_forward + 350 + random.randint(50, 200)
+        z = 25
+        if spot_ok(x, y, is_mg=True):
+            magnets.append({'x': x, 'y': y, 'z': z})
+            return
+        tries += 1
+
+
+def update_daynight():
+    global bg_rgb, is_day, is_transitioning, trans_dir
+    if is_transitioning:
+        if trans_dir == 1:
+            bg_rgb[0] = min(0.5, bg_rgb[0] + trans_step)
+            bg_rgb[1] = min(0.8, bg_rgb[1] + trans_step * 2)
+            bg_rgb[2] = min(1.0, bg_rgb[2] + trans_step * 3)
+            if bg_rgb[2] >= 1.0:
+                is_day = True
+                is_transitioning = False
+        elif trans_dir == -1:
+            bg_rgb[0] = max(0.05, bg_rgb[0] - trans_step)
+            bg_rgb[1] = max(0.05, bg_rgb[1] - (trans_step * 2))
+            bg_rgb[2] = max(0.08, bg_rgb[2] - (trans_step * 2))
+            if bg_rgb[1] <= 0.05:
+                is_day = False
+                is_transitioning = False
+
 
 def update_coins():
-    """Update coin positions and check for collection"""
     global points, coins
-    
-    # Move coins toward the player (simulate player moving forward)
-    for coin in coins[:]:
-        coin['y'] -= game_speed
-        
-        # Check if coin is behind the player
-        if coin['y'] < runner_z_pos - 50:
-            coins.remove(coin)
+    for c in coins[:]:
+        # Move coins toward player
+        c['y'] -= game_speed
+
+        # Remove coins that are behind the player
+        if c['y'] < runner_forward - 50:
+            coins.remove(c)
             continue
-            
-        # Check for collection
-        distance = math.sqrt(
-            (coin['x'] - runner_x_pos)**2 + 
-            (coin['y'] - runner_z_pos)**2 + 
-            (coin['z'] - 20)**2
-        )
-        
-        if distance < coin_collection_distance:
-            coins.remove(coin)  # Remove coin instantly
-            points += 1
-            print(f"Coin collected! Total points: {points}")
+
+        # Magnetic attraction when magnet power-up is active
+        if mag_on:
+            dx = runner_side - c['x']
+            dy = runner_forward - c['y']
+            dz = 20 - c['z']
+            dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+            if dist < mag_radius:        # Within magnetic field
+                if dist > 0:
+                    kx = dx / dist * mag_pull
+                    ky = dy / dist * mag_pull
+                    kz = dz / dist * mag_pull
+                    c['x'] += kx
+                    c['y'] += ky
+                    c['z'] += kz
+                if dist < coin_pick_radius:
+                    if c.get('type', 'normal') == "double":
+                        points += 2
+                        print(f"Magnet collected double coin! +2 points. Total points: {points}")
+                    else:
+                        points += 1
+                        print(f"Magnet collected coin! +1 point. Total points: {points}")
+                    coins.remove(c)
+                continue
+
+        d = math.sqrt((c['x'] - runner_side)**2 + (c['y'] - runner_forward)**2 + (c['z'] - 20)**2)
+        if d < coin_pick_radius:
+            if c.get('type', 'normal') == "double":
+                points += 2
+                print(f"Double coin collected! +2 points. Total points: {points}")
+            else:
+                points += 1
+                print(f"Coin collected! +1 point. Total points: {points}")
+            coins.remove(c)
+
 
 def update_obstacles():
-    """Update obstacle positions and check for collisions"""
-    global game_running, obstacles
-    
-    # Move obstacles toward the player (simulate player moving forward)
-    for obstacle in obstacles[:]:
-        obstacle['y'] -= game_speed
-        
-        # Check if obstacle is behind the player
-        if obstacle['y'] < runner_z_pos - 50:
-            obstacles.remove(obstacle)
+    global is_running, obstacles, lives
+    for o in obstacles[:]:
+        # Move obstacles toward player
+        o['y'] -= game_speed
+        if o['y'] < runner_forward - 50:
+            obstacles.remove(o)
             continue
-            
-        # Check for collision
-        distance = math.sqrt(
-            (obstacle['x'] - runner_x_pos)**2 + 
-            (obstacle['y'] - runner_z_pos)**2 + 
-            (obstacle['z'] - 10)**2
-        )
-        
-        if distance < obstacle_collision_distance:
-            game_running = False
-            print(f"Game Over! Final points: {points}")
-            break
 
-def draw_ground():
-    """Draw ground/hills for background"""
-    # Ground plane
-    glColor3f(0.2, 0.8, 0.2)  # Green ground
-    glBegin(GL_QUADS)
-    
-    ground_size = 1000
-    glVertex3f(-ground_size, -ground_size, -5)
-    glVertex3f(ground_size, -ground_size, -5)
-    glVertex3f(ground_size, ground_size, -5)
-    glVertex3f(-ground_size, ground_size, -5)
-    
-    glEnd()
-    
-    # Side barriers/walls
-    glColor3f(0.6, 0.3, 0.1)  # Brown barriers
-    barrier_height = 50
-    track_width = LANE_WIDTH * 3
-    
-    # Left barrier
-    glBegin(GL_QUADS)
-    glVertex3f(-track_width/2 - 20, -1000, 0)
-    glVertex3f(-track_width/2 - 20, 1000, 0)
-    glVertex3f(-track_width/2 - 20, 1000, barrier_height)
-    glVertex3f(-track_width/2 - 20, -1000, barrier_height)
-    glEnd()
-    
-    # Right barrier
-    glBegin(GL_QUADS)
-    glVertex3f(track_width/2 + 20, -1000, 0)
-    glVertex3f(track_width/2 + 20, 1000, 0)
-    glVertex3f(track_width/2 + 20, 1000, barrier_height)
-    glVertex3f(track_width/2 + 20, -1000, barrier_height)
-    glEnd()
+        # Check collision with player
+        d = math.sqrt((o['x'] - runner_side)**2 + (o['y'] - runner_forward)**2 + (o['z'] - 10)**2)
+        if d < hit_radius:
+            if o.get('type', 'normal') == "life":
+                lives -= 1
+                print(f"Black box hit! Life remaining: {lives}")
+                obstacles.remove(o)
+                if lives <= 0:
+                    is_running = False
+                    print(f"Game Over! Final points: {points}")
+                    break
+            else:
+                is_running = False
+                print(f"Game Over! Final points: {points}")
+                break
 
-def draw_shapes():
-    """Draw all game objects"""
-    draw_ground()
-    draw_track()
-    draw_runner()
-    draw_coins()
-    draw_obstacles()
+
+def update_magnets():
+    global magnets, mag_on, mag_time_left
+    for m in magnets[:]:
+        m['y'] -= game_speed
+        if m['y'] < runner_forward - 50:
+            magnets.remove(m)
+            continue
+
+        d = math.sqrt((m['x'] - runner_side)**2 + (m['y'] - runner_forward)**2 + (m['z'] - 20)**2)
+        if d < mag_pick_radius:
+            magnets.remove(m)
+            mag_on = True
+            mag_time_left += mag_seconds
+            print(f"Magnet collected! Active for {mag_time_left:.1f} more seconds")
+
 
 def update_game():
-    """Update game logic"""
-    global runner_x_pos, runner_target_x, track_offset, score, distance_covered, game_speed, start_time
-    global coin_spawn_timer, coins, obstacle_spawn_timer, obstacles
-    
-    if not game_running or start_time is None:
+    global runner_side, runner_side_goal, track_scroll, score, meters, game_speed, t_start
+    global coin_t, ob_t, mg_t, anim_curr, mag_on, mag_time_left
+
+    if not is_running or t_start is None:
         return
-    
-    # Calculate distance based on time (1 meter per second)
-    current_time = time.time()
-    distance_covered = current_time - start_time
-    
-    # Smooth lane transition with better interpolation
-    diff = runner_target_x - runner_x_pos
+
+    # distance traveled (time-based)
+    now = time.time()
+    meters = now - t_start
+
+    # Smooth lane switching animation
+    diff = runner_side_goal - runner_side
     if abs(diff) > 0.5:
-        runner_x_pos += diff * 0.15  # Smoother interpolation
+        runner_side += diff * 0.15      # Interpolate to target position
     else:
-        runner_x_pos = runner_target_x
-    
-    # Move track (creates running effect)
-    track_offset += game_speed
-    
-    # Much more gradual speed increase (every 20 seconds instead of 10)
-    speed_increase = min(distance_covered / 20.0, max_speed - base_speed)  # Increase every 20 seconds
-    game_speed = base_speed + speed_increase * 0.5  # Even slower speed increase rate
-    
-    # Increase score over time
+        runner_side = runner_side_goal
+
+    # track scrolling effect
+    track_scroll += game_speed
+
+    # Gradually increase game speed
+    speed_gain = min(meters / 15.0, max_speed - base_speed)
+    game_speed = base_speed + speed_gain * 0.7
+
+    # Increase animation speed to match game speed
+    anim_gain = min(meters / 15.0, anim_max - anim_base)
+    anim_curr = anim_base + anim_gain * 0.7
+
+    # Update magnet power-up timer
+    if mag_on:
+        mag_time_left -= 0.016
+        if mag_time_left <= 0:
+            mag_on = False
+            mag_time_left = 0.0
+            print("Magnet effect ended")
+
     score += 1
-    
-    # Update coins and obstacles
+
     update_coins()
     update_obstacles()
-    
-    # Spawn new coins periodically
-    coin_spawn_timer += 0.016  # Assuming ~60fps
-    if coin_spawn_timer >= coin_spawn_interval:
-        spawn_coin()
-        coin_spawn_timer = 0
-    
-    # Spawn new obstacles periodically
-    obstacle_spawn_timer += 0.016  # Assuming ~60fps
-    if obstacle_spawn_timer >= obstacle_spawn_interval:
-        spawn_obstacle()
-        obstacle_spawn_timer = 0
+    update_magnets()
+    update_daynight()
 
+    coin_t += 0.016
+    if coin_t >= coin_period:
+        emit_coin()
+        coin_t = 0.0
+
+    ob_t += 0.016
+    if ob_t >= ob_period:
+        emit_obstacles()
+        ob_t = 0.0
+
+    mg_t += 0.016
+    if mg_t >= mg_period:
+        emit_magnet()
+        mg_t = 0.0
+
+
+
+# Input handlers
 def keyboardListener(key, x, y):
-    """
-    Handles keyboard inputs for player movement, camera updates, reset, and pause toggle.
-    """
-    global game_running, current_lane, runner_target_x, start_time, pause_start
-    
-    # Reset the game if R key is pressed
+    global is_running, lane_idx, runner_side_goal, t_start, t_pause_begin
+    global is_transitioning, trans_dir, is_day
+
+    # R key resets the game
     if key == b'r':
         reset_game()
         print("Game Reset!")
         return
 
-    # SPACE to pause/resume
+    # Spacebar pauses/resumes the game
     if key == b' ':
-        if game_running:
-            # Pause: stop updates and record when pause began
-            game_running = False
-            pause_start = time.time()
+        if is_running:
+            is_running = False
+            t_pause_begin = time.time()    # Track pause start time
             print("Paused")
         else:
-            # Resume: adjust start_time so distance excludes pause duration
-            if pause_start is not None and start_time is not None:
-                paused_duration = time.time() - pause_start
-                start_time += paused_duration
-            game_running = True
-            pause_start = None
+            # Resume: adjust timer to exclude pause duration
+            if t_pause_begin is not None and t_start is not None:
+                paused = time.time() - t_pause_begin
+                t_start += paused
+            is_running = True
+            t_pause_begin = None
             print("Resumed")
 
+    if key == b'd':
+        if not is_day and not is_transitioning:
+            is_transitioning = True
+            trans_dir = 1
+            print("Transitioning to day...")
+    elif key == b'a':
+        if is_day and not is_transitioning:
+            is_transitioning = True
+            trans_dir = -1
+            print("Transitioning to night...")
+
+
 def specialKeyListener(key, x, y):
-    """
-    Handles special key inputs (arrow keys) for adjusting the camera angle and height,
-    and lane switching.
-    """
-    global camera_pos, current_lane, runner_target_x, runner_x_pos
-    cx, cy, cz = camera_pos
-    
-    # Move camera up (UP arrow key)
+    global cam_pos, lane_idx, runner_side_goal, runner_side
+    cx, cy, cz = cam_pos
+
+    # Up/Down arrows adjust camera height
     if key == GLUT_KEY_UP:
-        cz += 5
-    
-    # Move camera down (DOWN arrow key)
+        cz += 5                    # camera up
     if key == GLUT_KEY_DOWN:
-        cz -= 5
-    
-    # moving to left lane (LEFT arrow key)
+        cz -= 5                    # camera down
+
+    # Left/Right arrows switch lanes
     if key == GLUT_KEY_LEFT:
-        # Switch to left lane with debouncing
-        if current_lane > 0 and abs(runner_x_pos - runner_target_x) < 5:
-            current_lane -= 1
-            runner_target_x = LANE_POSITIONS[current_lane]
-            print(f"Switching to lane {current_lane}")
-    
-    # moving to right lane (RIGHT arrow key)
+        if lane_idx > 0 and abs(runner_side - runner_side_goal) < 5:
+            lane_idx -= 1
+            runner_side_goal = LANE_X[lane_idx]
+            print(f"Switching to lane {lane_idx}")
+
     if key == GLUT_KEY_RIGHT:
-        # Switch to right lane with debouncing
-        if current_lane < 2 and abs(runner_x_pos - runner_target_x) < 5:
-            current_lane += 1
-            runner_target_x = LANE_POSITIONS[current_lane]
-            print(f"Switching to lane {current_lane}")
+        if lane_idx < 2 and abs(runner_side - runner_side_goal) < 5:
+            lane_idx += 1
+            runner_side_goal = LANE_X[lane_idx]
+            print(f"Switching to lane {lane_idx}")
 
-    camera_pos = (cx, cy, cz)
+    cam_pos = (cx, cy, cz)
 
 
-def mouseListener(button, state, x, y):
-    """
-    Handles mouse inputs for future features (e.g., jump or camera toggle).
-    """
-    global first_person_view
-
+def mouse(button, state, x, y):
+    global is_fp
     if button == GLUT_RIGHT_BUTTON and state == GLUT_DOWN:
-        # Toggle between first-person and third-person view
-        first_person_view = not first_person_view
-        if first_person_view:
+        is_fp = not is_fp
+        if is_fp:
             print("Switched to First-Person View")
         else:
             print("Switched to Third-Person View")
 
 
-def setupCamera():
-    """
-    Configures the camera's projection and view settings.
-    Uses a perspective projection and positions the camera to look at the target.
-    """
-    glMatrixMode(GL_PROJECTION)  # Switch to projection matrix mode
-    glLoadIdentity()  # Reset the projection matrix
-    # Set up a perspective projection (field of view, aspect ratio, near clip, far clip)
-    gluPerspective(fovY, 1.25, 0.1, 1500)  # aspect ratio matches viewport 1000x800
-    glMatrixMode(GL_MODELVIEW)  # Switch to model-view matrix mode
-    glLoadIdentity()  # Reset the model-view matrix
 
-    # Extract camera position and follow the runner smoothly
-    cam_x, cam_y, cam_z = camera_pos
+# Camera & render pipeline
+def setup_camera():
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluPerspective(FOV_Y, 1.25, 0.1, 1500)
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
 
-    if first_person_view:
-        # In first-person view, the camera will follow the runner's position exactly
-        camera_x = runner_x_pos  # Directly behind the runner
-        camera_y = runner_z_pos + 10  # Height of the camera
-        camera_z = 10  # Just slightly in front of the runner to simulate first-person view
+    cx, cy, cz = cam_pos
+
+    if is_fp:
+        cam_x = runner_side
+        cam_y = runner_forward + 10
+        cam_z = 10
     else:
-        # In third-person view, the camera follows with a slight offset
-        camera_x = runner_x_pos * 0.3  # Reduced camera follow for less jitter
-        camera_y = runner_z_pos + cam_y
-        camera_z = cam_z
+        cam_x = runner_side * 0.3
+        cam_y = runner_forward + cy
+        cam_z = cz
 
-    # Position the camera and set its orientation
-    gluLookAt(camera_x, camera_y, camera_z,  # Camera position
-              runner_x_pos * 0.5, runner_z_pos + 100, 10,  # Look slightly ahead of runner
-              0, 0, 1)  # Up vector (z-axis)
+    gluLookAt(cam_x, cam_y, cam_z,
+              runner_side * 0.5, runner_forward + 100, 10,
+              0, 0, 1)
+
+
+def render_world():
+    draw_ground()          
+    draw_trees()           
+    draw_track()           
+    draw_runner()          
+    draw_all_coins()        
+    draw_all_magnets()      
+    draw_all_obstacles()    
 
 
 def idle():
-    """
-    Idle function that runs continuously:
-    - Triggers screen redraw for real-time updates.
-    """
-    update_game()  # Update game state
-    glutPostRedisplay()  # Ensure the screen updates with the latest changes
+    update_game()           
+    glutPostRedisplay()     
+
 
 def showScreen():
-    """
-    Display function to render the game scene:
-    - Clears the screen and sets up the camera.
-    - Draws everything on the screen.
-    """
-    # Clear color and depth buffers
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-    glLoadIdentity()  # Reset modelview matrix
-    glViewport(0, 0, 1000, 800)  # Set viewport size
-    
-    # Enable depth testing for 3D
+    glLoadIdentity()
+    glViewport(0, 0, 1000, 800)
+    draw_bg()
+
     glEnable(GL_DEPTH_TEST)
+    setup_camera()
+    render_world()
 
-    setupCamera()  # Configure camera perspective
-
-    draw_shapes()  # Draw all game objects
-
-    # Disable depth testing for UI text rendering
-    glDisable(GL_DEPTH_TEST)
-    
-    # HUD
-    draw_text(10, 670, f"Distance Travelled: {distance_covered:.1f}m")
+    draw_text(10, 670, f"Distance Travelled: {meters:.1f}m")
     draw_text(10, 640, f"Points: {points}")
-    draw_text(10, 610, f"Press 'r' to restart")
-    draw_text(10, 580, f"Press SPACE to pause/resume")
-    
-    if not game_running:
-        # Big PAUSED indicator
+    draw_text(10, 610, f"Life: {lives}")
+
+    if mag_on:
+        draw_text(10, 580, f"Magnet: ACTIVE ({mag_time_left:.1f}s)")
+    else:
+        draw_text(10, 580, f"Magnet: INACTIVE")
+
+    draw_text(10, 550, f"Press 'r' to restart")
+    draw_text(10, 520, f"Gold coins = 2 points, Silver coins = 1 point")
+    draw_text(10, 490, f"'d' = day, 'a' = night")
+    draw_text(10, 460, f"Mode: {'DAY' if is_day else 'NIGHT'}")
+    draw_text(10, 490, f"")
+
+    if not is_running:
         glColor3f(1, 1, 1)
-        draw_text(500, 400, "PAUSED", GLUT_BITMAP_TIMES_ROMAN_24)
-        
-        # Game over message if not paused
-        if pause_start is None:
-            draw_text(450, 350, "GAME OVER", GLUT_BITMAP_TIMES_ROMAN_24)
-            draw_text(430, 300, f"Final Points: {points}", GLUT_BITMAP_TIMES_ROMAN_24)
+        draw_text(500, 400, "PAUSED")
+        if t_pause_begin is None:
+            draw_text(450, 350, "GAME OVER")
+            draw_text(430, 300, f"Final Points: {points}")
 
-    # Re-enable depth testing
-    glEnable(GL_DEPTH_TEST)
-
-    # Swap buffers for smooth rendering (double buffering)
     glutSwapBuffers()
 
-# Main function to set up OpenGL window and loop
+
 def main():
-    global start_time
-    
+    """Initialize OpenGL window and start the game"""
+    global t_start
+    # Initialize GLUT 
     glutInit()
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)  # Double buffering, RGB color, depth test
-    glutInitWindowSize(1000, 800)  # Window size
-    glutInitWindowPosition(0, 0)  # Window position
-    glutCreateWindow(b"3D Runner Game")  # Create the window
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)  
+    glutInitWindowSize(1000, 800)                             
+    glutInitWindowPosition(0, 0)                              
+    glutCreateWindow(b"3D Runner Game")                        
 
-    glutDisplayFunc(showScreen)      # Register display function
-    glutKeyboardFunc(keyboardListener)  # Register keyboard listener
-    glutSpecialFunc(specialKeyListener)
-    glutMouseFunc(mouseListener)
-    glutIdleFunc(idle)  # Register the idle function for continuous updates
-    
-    # Set clear color to sky blue
-    glClearColor(0.5, 0.8, 1.0, 1.0)
-    
-    # Initialize start time
-    start_time = time.time()
+    glutDisplayFunc(showScreen)     
+    glutKeyboardFunc(keyboardListener)      
+    glutSpecialFunc(specialKeyListener)   
+    glutMouseFunc(mouse)       
+    glutIdleFunc(idle)         
 
-    glutMainLoop()  # Enter the GLUT main loop
+
+    t_start = time.time()
+    glutMainLoop()
+
 
 if __name__ == "__main__":
     main()
